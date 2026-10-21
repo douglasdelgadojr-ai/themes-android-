@@ -27,10 +27,15 @@ import android.widget.LinearLayout.LayoutParams as LP
 /**
  * Tema BJ30 (oscuro): barra lateral fija, reproductor con planeta que cambia según la fuente
  * (radio / CarPlay / música), 4 tarjetas editables arriba a la derecha y la temperatura de Managua en la barra inferior.
- * Solo las 4 tarjetas (slots 20-23) se ponen/quitan manteniendo pulsado. Barra lateral: slots 10-13 fijos.
+ * Tarjetas (slots 20-23) y barra lateral (slots 10-13): mantén pulsado un ícono para ponerlo o quitarlo.
  */
 class BjTheme : LauncherTheme {
     override val name = "BJ30"
+
+    // Tamaños en dp. Si algo se ve chico o grande, cambia solo estos números.
+    private val RAIL_ICON = 60
+    private val CARD_ICON = 64
+    private val CARD_H = 150
 
     private var apps: List<ResolveInfo> = emptyList()
 
@@ -113,17 +118,17 @@ class BjTheme : LauncherTheme {
         }
         val icon: View = try {
             appName = pm.getApplicationLabel(pm.getApplicationInfo(pkg!!, 0)).toString()
-            ImageView(ctx).apply { setImageDrawable(pm.getApplicationIcon(pkg)) }
+            IconStyle.view(ctx, pkg, iconDp)
         } catch (e: Exception) {
             appName = ""
-            label(ctx, if (editable) "+" else "", 24f).apply {
+            label(ctx, if (editable) "+" else "", 30f).apply {
                 gravity = Gravity.CENTER; setTextColor(0x66FFFFFF)
                 background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x14FFFFFF) }
             }
         }
         box.addView(icon, LP(ctx.dp(iconDp), ctx.dp(iconDp)))
         if (labeled && appName.isNotEmpty()) {
-            box.addView(label(ctx, appName, 12f).apply {
+            box.addView(label(ctx, appName, 14f).apply {
                 maxLines = 1; ellipsize = TextUtils.TruncateAt.END; gravity = Gravity.CENTER
                 setTextColor(0xFFB0BEC5.toInt())
             }, LP(-1, -2).apply { topMargin = ctx.dp(6) })
@@ -155,8 +160,8 @@ class BjTheme : LauncherTheme {
 
         // ---- Barra lateral (4 accesos fijos) ----
         val rail = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        for (i in 0 until 4) rail.addView(slot(ctx, host, 10 + i, 46, false, false, false), LP(-1, 0, 1f))
-        top.addView(rail, LP(ctx.dp(62), -1))
+        for (i in 0 until 4) rail.addView(slot(ctx, host, 10 + i, RAIL_ICON, false, false, true), LP(-1, 0, 1f))
+        top.addView(rail, LP(ctx.dp(84), -1))
 
         // ---- Reproductor (cambia según lo que suene: radio, CarPlay, música) ----
         val music = LinearLayout(ctx).apply {
@@ -191,9 +196,9 @@ class BjTheme : LauncherTheme {
         // ---- Columna derecha: 4 tarjetas editables ----
         val right = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         val cards = LinearLayout(ctx)
-        for (i in 0 until 4) cards.addView(slot(ctx, host, 20 + i, 44, true, true),
+        for (i in 0 until 4) cards.addView(slot(ctx, host, 20 + i, CARD_ICON, true, true),
             LP(0, -1, 1f).apply { setMargins(ctx.dp(5), 0, ctx.dp(5), 0) })
-        right.addView(cards, LP(-1, ctx.dp(118)))
+        right.addView(cards, LP(-1, ctx.dp(CARD_H)))
 
         top.addView(right, LP(0, -1, 1.55f))
 
@@ -206,24 +211,39 @@ class BjTheme : LauncherTheme {
             thumbTintList = ColorStateList.valueOf(Color.WHITE)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                    if (fromUser) am.setStreamVolume(AudioManager.STREAM_MUSIC, p, 0)
+                    if (fromUser) try { am.setStreamVolume(AudioManager.STREAM_MUSIC, p, 0) } catch (e: Exception) { }
                 }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {
+                    val want = s?.progress ?: return
+                    root.postDelayed({
+                        val got = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                        if (got != want) Toast.makeText(ctx, "La radio no aceptó el volumen (pedido $want, quedó $got)", Toast.LENGTH_LONG).show()
+                    }, 500)
+                }
             })
+        }
+        fun volBtn(t: String, dir: Int) = label(ctx, t, 32f).apply {
+            gravity = Gravity.CENTER
+            setOnClickListener {
+                try { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, AudioManager.FLAG_SHOW_UI) } catch (e: Exception) { }
+                vol.progress = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            }
         }
         val bar = LinearLayout(ctx).apply {
             gravity = Gravity.CENTER_VERTICAL; background = glass(ctx, 26)
             setPadding(ctx.dp(10), 0, ctx.dp(16), 0)
         }
         val appsBtn = FrameLayout(ctx).apply {
-            addView(LineIcon(ctx, LineIcon.Kind.GRID, Color.WHITE), FrameLayout.LayoutParams(ctx.dp(34), ctx.dp(34), Gravity.CENTER))
+            addView(LineIcon(ctx, LineIcon.Kind.GRID, Color.WHITE), FrameLayout.LayoutParams(ctx.dp(40), ctx.dp(40), Gravity.CENTER))
             setOnClickListener { host.openDrawer() }
             setOnLongClickListener { host.nextTheme(); true }
         }
-        bar.addView(appsBtn, LP(ctx.dp(76), -1))
-        bar.addView(LineIcon(ctx, LineIcon.Kind.VOL, 0xFF8097A0.toInt()), LP(ctx.dp(30), ctx.dp(30)))
-        bar.addView(vol, LP(ctx.dp(220), -2).apply { setMargins(ctx.dp(10), 0, 0, 0) })
+        bar.addView(appsBtn, LP(ctx.dp(84), -1))
+        bar.addView(LineIcon(ctx, LineIcon.Kind.VOL, 0xFF8097A0.toInt()), LP(ctx.dp(34), ctx.dp(34)))
+        bar.addView(volBtn("−", AudioManager.ADJUST_LOWER), LP(ctx.dp(52), -1))
+        bar.addView(vol, LP(ctx.dp(260), -1))
+        bar.addView(volBtn("+", AudioManager.ADJUST_RAISE), LP(ctx.dp(52), -1))
         bar.addView(View(ctx), LP(0, -1, 1f))   // empuja temperatura y reloj a la derecha
         val temp = label(ctx, "--°C", 21f, true).apply { gravity = Gravity.CENTER }
         bar.addView(temp, LP(ctx.dp(84), -1))
@@ -231,7 +251,7 @@ class BjTheme : LauncherTheme {
         bar.addView(TextClock(ctx).apply {
             format12Hour = "h:mm a\nEEE d MMM"; format24Hour = "h:mm a\nEEE d MMM"; textSize = 16f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
         }, LP(ctx.dp(120), -1))
-        root.addView(bar, LP(-1, ctx.dp(72)).apply { topMargin = ctx.dp(14) })
+        root.addView(bar, LP(-1, ctx.dp(84)).apply { topMargin = ctx.dp(14) })
 
         // Actualiza música y volumen cada segundo mientras la pantalla exista
         val tick = object : Runnable {
@@ -247,7 +267,7 @@ class BjTheme : LauncherTheme {
                     val radio = np.pkg.contains("radio", true) || np.pkg.contains("tuner", true) || lbl.contains("radio", true)
                     source.text = if (np.pkg.isEmpty()) "REPRODUCTOR" else if (radio) "RADIO" else lbl.uppercase()
                     title.textSize = if (radio) 40f else 22f
-                    title.text = np.title.ifEmpty { "Sin reproducción" }; artist.text = np.artist
+                    title.text = np.title.ifEmpty { if (np.playing) lbl.ifEmpty { "Reproduciendo" } else "Sin reproducción" }; artist.text = np.artist
                     playIcon.set(if (np.playing) TransportIcon.Kind.PAUSE else TransportIcon.Kind.PLAY)
                     planet.setPlaying(np.playing)
                     if (np.pkg.isNotEmpty()) music.setOnClickListener { host.launch(np.pkg) }
