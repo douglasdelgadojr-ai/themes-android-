@@ -29,6 +29,8 @@ class MainActivity : Activity(), ThemeHost {
     private var homeBanner: View? = null
     private var drawerGrid: GridView? = null
     private var drawerStyleBtn: TextView? = null
+    private var drawerTintBtn: TextView? = null
+    private var projectionPkg: String? = null   // app de proyección (CarPlay/RLink...) abierta por última vez
     private var iconPickPkg: String? = null
     private var needsRebuild = false
     private val REQ_ICON = 77
@@ -38,7 +40,25 @@ class MainActivity : Activity(), ThemeHost {
         super.onCreate(b)
         root = FrameLayout(this)
         setContentView(root)
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        // Si la barra de la radio reaparece (por ejemplo al deslizar desde el borde), se vuelve a ocultar sola
+        window.decorView.setOnSystemUiVisibilityChangeListener { v ->
+            if (v and View.SYSTEM_UI_FLAG_FULLSCREEN == 0) root.postDelayed({ hideBars() }, 2500)
+        }
+        hideBars()
         rebuild()
+    }
+
+    /** Modo inmersivo: oculta la barra superior (atrás / inicio / recientes) y la de navegación. */
+    private fun hideBars() {
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideBars()
     }
 
     private fun rebuild() {
@@ -53,7 +73,7 @@ class MainActivity : Activity(), ThemeHost {
         })
     }
 
-    override fun onResume() { super.onResume(); checkHome() }
+    override fun onResume() { super.onResume(); hideBars(); checkHome() }
 
     /** Si no somos el home por defecto, muestra un aviso para elegirnos como pantalla de inicio. */
     private fun checkHome() {
@@ -82,6 +102,7 @@ class MainActivity : Activity(), ThemeHost {
             Toast.makeText(this, if (pkg == NAV_PKG) "Waze no está instalado" else "App no instalada", Toast.LENGTH_SHORT).show()
             return
         }
+        if (pkg != null && isProjection(pkg)) projectionPkg = pkg
         try { startActivity(i) }
         catch (e: Exception) { Toast.makeText(this, "No se pudo abrir la app", Toast.LENGTH_SHORT).show() }
     }
@@ -97,23 +118,56 @@ class MainActivity : Activity(), ThemeHost {
         am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
     }
 
+    private fun appLabelOf(pkg: String): String = try {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+    } catch (e: Exception) { "" }
+
+    private fun isProjection(pkg: String): Boolean {
+        val k = (pkg + " " + appLabelOf(pkg)).lowercase()
+        return listOf("rlink", "carplay", "easyconn", "zlink", "carlink", "android auto", "androidauto").any { k.contains(it) }
+    }
+
+    private fun isBluetoothSession(pkg: String): Boolean {
+        val k = (pkg + " " + appLabelOf(pkg)).lowercase()
+        return listOf("bluetooth", "btmusic", "bt music", "a2dp").any { k.contains(it) }
+    }
+
+    private fun fromSession(c: android.media.session.MediaController, playing: Boolean): NowPlaying {
+        val m = c.metadata
+        return NowPlaying(
+            m?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: m?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: "",
+            m?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: m?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: "",
+            playing,
+            m?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART),
+            c.packageName
+        )
+    }
+
     override fun nowPlaying(): NowPlaying? = try {
         val msm = getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val list = msm.getActiveSessions(ComponentName(this, MediaListener::class.java))
-        val c = list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING } ?: list.firstOrNull()
-        if (c == null) {
-            // Ninguna app publica sesión de música: al menos avisa si el sistema detecta audio sonando
-            if (am.isMusicActive) NowPlaying("Reproduciendo", "", true, null) else NowPlaying("Sin reproducción", "", false, null)
-        } else {
-            val m = c.metadata
-            NowPlaying(
-                m?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: m?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: "",
-                m?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: m?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: "",
-                c.playbackState?.state == PlaybackState.STATE_PLAYING || am.isMusicActive,
-                m?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART),
-                c.packageName
-            )
+        val all = msm.getActiveSessions(ComponentName(this, MediaListener::class.java))
+        val musicOn = am.isMusicActive
+        if (!musicOn) projectionPkg = null           // ya no suena nada: olvida la proyección
+        val proj = projectionPkg
+        // Con CarPlay/RLink abierto, una sesión vieja de Bluetooth no cuenta
+        val list = if (proj != null) all.filter { !isBluetoothSession(it.packageName) } else all
+        val playing = list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
+        when {
+            playing != null -> fromSession(playing, true)
+            musicOn && proj != null -> {
+                val k = (proj + " " + appLabelOf(proj)).lowercase()
+                when {
+                    listOf("carplay", "rlink", "zlink", "carlink").any { k.contains(it) } ->
+                        NowPlaying("Apple CarPlay", "Reproduciendo desde tu iPhone", true, null, proj, "CARPLAY")
+                    k.contains("auto") ->
+                        NowPlaying("Android Auto", "Reproduciendo desde tu teléfono", true, null, proj, "ANDROID AUTO")
+                    else -> NowPlaying(appLabelOf(proj).ifEmpty { "Proyección" }, "Reproduciendo", true, null, proj, "PROYECCIÓN")
+                }
+            }
+            musicOn -> NowPlaying("Reproduciendo", "", true, null)
+            list.isNotEmpty() -> fromSession(list.first(), false)
+            else -> NowPlaying("Sin reproducción", "", false, null)
         }
     } catch (e: SecurityException) { null } catch (e: Exception) { NowPlaying("Sin reproducción", "", false, null) }
 
@@ -136,7 +190,9 @@ class MainActivity : Activity(), ThemeHost {
             .sortedBy { it.loadLabel(pm).toString().lowercase() }
 
         val grid = GridView(this).apply {
-            numColumns = 6; verticalSpacing = dp(10); setPadding(dp(12), dp(8), dp(12), dp(8))
+            numColumns = 6; verticalSpacing = dp(26); stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            setPadding(dp(28), dp(14), dp(28), dp(24)); clipToPadding = false
+            selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
             adapter = object : BaseAdapter() {
                 override fun getCount() = apps.size
                 override fun getItem(p: Int) = apps[p]
@@ -146,11 +202,13 @@ class MainActivity : Activity(), ThemeHost {
                     val pkg = ri.activityInfo.packageName
                     return LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-                        addView(IconStyle.view(this@MainActivity, pkg, 64, ri.loadIcon(pm)),
-                            LinearLayout.LayoutParams(dp(64), dp(64)))
+                        addView(IconStyle.view(this@MainActivity, pkg, 76, ri.loadIcon(pm)),
+                            LinearLayout.LayoutParams(dp(76), dp(76)))
                         addView(label(context, ri.loadLabel(pm).toString(), 13f).apply {
                             maxLines = 1; gravity = Gravity.CENTER
-                        })
+                            ellipsize = android.text.TextUtils.TruncateAt.END
+                            setTextColor(0xFFB0BEC5.toInt())
+                        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
                     }
                 }
             }
@@ -165,8 +223,8 @@ class MainActivity : Activity(), ThemeHost {
         }
         drawerGrid = grid
         val bar = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(16), dp(8), dp(16), dp(8))
-            addView(label(context, if (pickSlot >= 0) "Elige app para el dock" else "Apps  ·  mantén pulsada una app para cambiar su ícono", 18f, true),
+            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(28), dp(12), dp(28), dp(4))
+            addView(label(context, if (pickSlot >= 0) "Elige app para el dock" else "Aplicaciones", 20f, true),
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             if (pickSlot >= 0) addView(label(context, "Quitar icono", 18f).apply {
                 setPadding(0, 0, dp(24), 0)
@@ -178,17 +236,23 @@ class MainActivity : Activity(), ThemeHost {
             }
             drawerStyleBtn = styleBtn
             addView(styleBtn)
+            val tintBtn = label(context, "Tinte: ${IconStyle.tintName(this@MainActivity)}", 18f).apply {
+                setPadding(0, 0, dp(24), 0)
+                setOnClickListener { tintMenu() }
+            }
+            drawerTintBtn = tintBtn
+            addView(tintBtn)
             addView(label(context, "Cerrar ✕", 18f).apply { setOnClickListener { closeDrawer() } })
         }
         drawer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(0xEE0B1030.toInt())
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFF050608.toInt())
             addView(bar); addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
         }
         root.addView(drawer, FrameLayout.LayoutParams(-1, -1))
     }
 
     private fun closeDrawer() {
-        drawer?.let { root.removeView(it) }; drawer = null; drawerGrid = null; drawerStyleBtn = null; pickSlot = -1
+        drawer?.let { root.removeView(it) }; drawer = null; drawerGrid = null; drawerStyleBtn = null; drawerTintBtn = null; pickSlot = -1
         if (needsRebuild) { needsRebuild = false; rebuild() }
     }
 
@@ -197,18 +261,41 @@ class MainActivity : Activity(), ThemeHost {
         needsRebuild = true
         (drawerGrid?.adapter as? BaseAdapter)?.notifyDataSetChanged()
         drawerStyleBtn?.text = "Íconos: ${IconStyle.modeName(this)}"
+        drawerTintBtn?.text = "Tinte: ${IconStyle.tintName(this)}"
     }
 
     // ---- Íconos personalizados (mantener pulsada una app en el cajón) ----
     private fun iconMenu(ri: ResolveInfo) {
         val pkg = ri.activityInfo.packageName
         val name = ri.loadLabel(packageManager).toString()
-        val items = if (IconStyle.hasCustom(this, pkg)) arrayOf("Elegir otra imagen…", "Restaurar ícono original")
-        else arrayOf("Elegir imagen…")
-        AlertDialog.Builder(this).setTitle("Ícono de $name").setItems(items) { _, which ->
-            if (which == 0) pickIcon(pkg)
-            else { IconStyle.customFile(this, pkg).delete(); refreshDrawerIcons() }
-        }.show()
+        val hasCustom = IconStyle.hasCustom(this, pkg)
+        val hasOwnStyle = IconStyle.appMode(this, pkg) >= 0
+        val items = ArrayList<String>()
+        val acts = ArrayList<() -> Unit>()
+        items.add("Estilo de este ícono…"); acts.add { styleMenu(pkg, name) }
+        items.add(if (hasCustom) "Elegir otra imagen…" else "Elegir imagen…"); acts.add { pickIcon(pkg) }
+        if (hasCustom || hasOwnStyle) {
+            items.add("Restaurar ícono")
+            acts.add { IconStyle.customFile(this, pkg).delete(); IconStyle.setAppMode(this, pkg, -1); refreshDrawerIcons() }
+        }
+        AlertDialog.Builder(this).setTitle("Ícono de $name").setItems(items.toTypedArray()) { _, which -> acts[which]() }.show()
+    }
+
+    private fun styleMenu(pkg: String, name: String) {
+        val opts = arrayOf("Como todos (${IconStyle.modeName(this)})") + IconStyle.styleNames
+        AlertDialog.Builder(this).setTitle("Estilo de $name")
+            .setSingleChoiceItems(opts, IconStyle.appMode(this, pkg) + 1) { d, w ->
+                IconStyle.setAppMode(this, pkg, w - 1)
+                IconStyle.customFile(this, pkg).delete()   // elegir un estilo reemplaza la imagen propia
+                d.dismiss(); refreshDrawerIcons()
+            }.setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun tintMenu() {
+        AlertDialog.Builder(this).setTitle("Color del estilo Teñido")
+            .setSingleChoiceItems(IconStyle.tintNames, IconStyle.tintIndex(this)) { d, w ->
+                IconStyle.setTint(this, w); d.dismiss(); refreshDrawerIcons()
+            }.setNegativeButton("Cancelar", null).show()
     }
 
     private fun pickIcon(pkg: String) {
