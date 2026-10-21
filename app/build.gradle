@@ -1,0 +1,17 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+android {
+    namespace 'com.douglas.temas'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'com.douglas.temas'
+        minSdk 24
+        targetSdk 27   // Android 8.1 real del headunit
+        versionCode 9
+        versionName "0.9"
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+    kotlinOptions { jvmTarget = '1.8' }
+}
