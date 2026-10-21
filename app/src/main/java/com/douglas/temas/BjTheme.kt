@@ -1,6 +1,7 @@
 package com.douglas.temas
 
 import android.animation.ValueAnimator
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ResolveInfo
@@ -145,6 +146,38 @@ class BjTheme : LauncherTheme {
             setOnClickListener { onClick() }
         }
 
+    /** Mantén pulsado el ícono 🔊: prueba cómo responde el volumen de la radio y muestra el resultado. */
+    private fun probeVolume(ctx: Context, root: View) {
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val streams = listOf("Música" to AudioManager.STREAM_MUSIC, "Sistema" to AudioManager.STREAM_SYSTEM,
+            "Alarma" to AudioManager.STREAM_ALARM, "Notif." to AudioManager.STREAM_NOTIFICATION,
+            "Llamada" to AudioManager.STREAM_VOICE_CALL, "Timbre" to AudioManager.STREAM_RING)
+        fun snap() = streams.joinToString("\n") { "${it.first}: ${am.getStreamVolume(it.second)} / ${am.getStreamMaxVolume(it.second)}" }
+        val info = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · ${android.os.Build.HARDWARE} · Android ${android.os.Build.VERSION.RELEASE}"
+        val pk = try {
+            ctx.packageManager.getInstalledPackages(0).map { it.packageName }
+                .filter { p -> listOf("syu", "fyt", "mcu", "volume", "hct", "carset", "dsp").any { p.contains(it, true) } }.take(10).joinToString("\n")
+        } catch (e: Exception) { "" }
+        val before = snap()
+        val cur = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val target = if (cur > 0) cur - 1 else cur + 1
+        val log = StringBuilder()
+        try { am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0) } catch (e: Exception) { log.append("setStreamVolume: error ${e.javaClass.simpleName}\n") }
+        root.postDelayed({
+            val a = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            log.append("setStreamVolume $cur→$target: quedó $a ${if (a == target) "OK" else "NO"}\n")
+            try { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, if (a <= cur) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, 0) } catch (e: Exception) { log.append("adjust: error ${e.javaClass.simpleName}\n") }
+            root.postDelayed({
+                val b = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                log.append("adjustStreamVolume desde $a: quedó $b ${if (b != a) "OK" else "NO"}\n")
+                try { am.setStreamVolume(AudioManager.STREAM_MUSIC, cur, 0) } catch (e: Exception) { }
+                AlertDialog.Builder(ctx).setTitle("Diagnóstico de volumen")
+                    .setMessage("$info\n\nAntes:\n$before\n\n$log\nPaquetes de la radio:\n${pk.ifEmpty { "(ninguno)" }}")
+                    .setPositiveButton("OK", null).show()
+            }, 700)
+        }, 700)
+    }
+
     override fun build(ctx: Context, host: ThemeHost): View {
         apps = ctx.packageManager.queryIntentActivities(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
@@ -218,8 +251,17 @@ class BjTheme : LauncherTheme {
                     val want = s?.progress ?: return
                     root.postDelayed({
                         val got = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                        if (got != want) Toast.makeText(ctx, "La radio no aceptó el volumen (pedido $want, quedó $got)", Toast.LENGTH_LONG).show()
-                    }, 500)
+                        if (got != want) {
+                            // Plan B: pasos sueltos, como si fueran las teclas de volumen
+                            var n = Math.abs(want - got)
+                            val dir = if (want > got) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER
+                            while (n-- > 0) { try { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, 0) } catch (e: Exception) { break } }
+                            root.postDelayed({
+                                val g2 = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                if (g2 != want) Toast.makeText(ctx, "La radio no aceptó el volumen (pedido $want, quedó $g2). Mantén pulsado el ícono 🔊 para diagnosticar", Toast.LENGTH_LONG).show()
+                            }, 500)
+                        }
+                    }, 400)
                 }
             })
         }
@@ -240,7 +282,9 @@ class BjTheme : LauncherTheme {
             setOnLongClickListener { host.nextTheme(); true }
         }
         bar.addView(appsBtn, LP(ctx.dp(84), -1))
-        bar.addView(LineIcon(ctx, LineIcon.Kind.VOL, 0xFF8097A0.toInt()), LP(ctx.dp(34), ctx.dp(34)))
+        bar.addView(LineIcon(ctx, LineIcon.Kind.VOL, 0xFF8097A0.toInt()).apply {
+            setOnLongClickListener { probeVolume(ctx, root); true }   // diagnóstico del volumen
+        }, LP(ctx.dp(34), ctx.dp(34)))
         bar.addView(volBtn("−", AudioManager.ADJUST_LOWER), LP(ctx.dp(52), -1))
         bar.addView(vol, LP(ctx.dp(260), -1))
         bar.addView(volBtn("+", AudioManager.ADJUST_RAISE), LP(ctx.dp(52), -1))
@@ -264,10 +308,15 @@ class BjTheme : LauncherTheme {
                     planet.setPlaying(false)
                 } else {
                     val lbl = if (np.pkg.isEmpty()) "" else appLabel(ctx, np.pkg)
-                    val radio = np.pkg.contains("radio", true) || np.pkg.contains("tuner", true) || lbl.contains("radio", true)
-                    source.text = if (np.pkg.isEmpty()) "REPRODUCTOR" else if (radio) "RADIO" else lbl.uppercase()
-                    title.textSize = if (radio) 40f else 22f
-                    title.text = np.title.ifEmpty { if (np.playing) lbl.ifEmpty { "Reproduciendo" } else "Sin reproducción" }; artist.text = np.artist
+                    if (np.source.isNotEmpty()) {
+                        // fuente sin sesión de música (CarPlay, Android Auto...)
+                        source.text = np.source; title.textSize = 22f; title.text = np.title; artist.text = np.artist
+                    } else {
+                        val radio = np.pkg.contains("radio", true) || np.pkg.contains("tuner", true) || lbl.contains("radio", true)
+                        source.text = if (np.pkg.isEmpty()) "REPRODUCTOR" else if (radio) "RADIO" else lbl.uppercase()
+                        title.textSize = if (radio) 40f else 22f
+                        title.text = np.title.ifEmpty { if (np.playing) lbl.ifEmpty { "Reproduciendo" } else "Sin reproducción" }; artist.text = np.artist
+                    }
                     playIcon.set(if (np.playing) TransportIcon.Kind.PAUSE else TransportIcon.Kind.PLAY)
                     planet.setPlaying(np.playing)
                     if (np.pkg.isNotEmpty()) music.setOnClickListener { host.launch(np.pkg) }
