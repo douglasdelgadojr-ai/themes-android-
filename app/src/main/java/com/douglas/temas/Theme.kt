@@ -35,7 +35,7 @@ interface ThemeHost {
     fun openSettings(action: String)
 }
 
-data class NowPlaying(val title: String, val artist: String, val playing: Boolean, val art: Bitmap?, val pkg: String = "")
+data class NowPlaying(val title: String, val artist: String, val playing: Boolean, val art: Bitmap?, val pkg: String = "", val source: String = "")
 
 fun Context.dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -60,11 +60,9 @@ fun dockRow(ctx: Context, host: ThemeHost): LinearLayout {
     for (i in 0 until 5) {
         val pkg = host.dockPackage(i)
         val slot = FrameLayout(ctx).apply {
-            val icon: View = try {
-                ImageView(ctx).apply { setImageDrawable(ctx.packageManager.getApplicationIcon(pkg!!)) }
-            } catch (e: Exception) { label(ctx, "+", 30f).apply { gravity = Gravity.CENTER } }
+            val icon: View = if (pkg.isNullOrEmpty()) label(ctx, "+", 30f).apply { gravity = Gravity.CENTER } else IconStyle.view(ctx, pkg, 50)
             addView(icon, FrameLayout.LayoutParams(ctx.dp(50), ctx.dp(50), Gravity.CENTER))
-            setOnClickListener { if (pkg != null) host.launch(pkg) else host.pickDockSlot(i) }
+            setOnClickListener { if (!pkg.isNullOrEmpty()) host.launch(pkg) else host.pickDockSlot(i) }
             setOnLongClickListener { host.pickDockSlot(i); true }
         }
         dock.addView(slot, LinearLayout.LayoutParams(0, -1, 1f))
