@@ -26,6 +26,11 @@ import kotlin.math.pow
 import kotlin.math.sign
 import kotlin.math.sin
 
+/**
+ * Capa de personalización de íconos estilo Apple: todos con esquinas redondeadas y un estilo
+ * (Original / Cristal / Color / Claro / Oscuro / Teñido) global o por app, o una imagen propia por app.
+ * Los íconos se dibujan en alta resolución (192 px) y se guardan en caché, así se ven nítidos.
+ */
 object IconStyle {
     const val ORIGINAL = 0
     const val GLASS = 1
@@ -47,10 +52,12 @@ object IconStyle {
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("launcher", Context.MODE_PRIVATE)
 
+    // ---- Estilo global y por app ----
     fun mode(ctx: Context): Int = prefs(ctx).getInt("icon_style", GLASS).coerceIn(0, names.size - 1)
     fun modeName(ctx: Context): String = names[mode(ctx)]
     fun cycle(ctx: Context) { prefs(ctx).edit().putInt("icon_style", (mode(ctx) + 1) % names.size).apply() }
 
+    /** -1 = esta app sigue el estilo global. */
     fun appMode(ctx: Context, pkg: String): Int {
         val v = prefs(ctx).getInt("icon_style_$pkg", -1)
         return if (v in 0 until names.size) v else -1
@@ -62,10 +69,12 @@ object IconStyle {
     }
     private fun modeFor(ctx: Context, pkg: String): Int = appMode(ctx, pkg).let { if (it >= 0) it else mode(ctx) }
 
+    // ---- Tinte (para el estilo "Teñido") ----
     fun tintIndex(ctx: Context): Int = prefs(ctx).getInt("icon_tint", 0).coerceIn(0, tintColors.size - 1)
     fun setTint(ctx: Context, i: Int) { prefs(ctx).edit().putInt("icon_tint", i).apply() }
     fun tintName(ctx: Context): String = tintNames[tintIndex(ctx)]
 
+    // ---- Imagen propia ----
     fun customFile(ctx: Context, pkg: String): File {
         val dir = File(ctx.filesDir, "icons")
         dir.mkdirs()
@@ -73,6 +82,7 @@ object IconStyle {
     }
     fun hasCustom(ctx: Context, pkg: String): Boolean = customFile(ctx, pkg).exists()
 
+    /** Ícono de la app en alta densidad (si la radio tiene pantalla de baja densidad, el normal sale borroso). */
     private fun hiRes(ctx: Context, pkg: String, fallback: Drawable?): Drawable? {
         try {
             val pm = ctx.packageManager
@@ -94,6 +104,7 @@ object IconStyle {
         (Color.blue(a) * (1 - t) + Color.blue(b) * t).toInt()
     )
 
+    /** Forma de esquinas redondeadas tipo Apple (superelipse, más redonda que antes). */
     private fun squircle(size: Float, inset: Float = 0f): Path {
         val r = size / 2f - inset
         val c = size / 2f
@@ -102,8 +113,8 @@ object IconStyle {
         for (i in 0..steps) {
             val t = 2.0 * PI * i / steps
             val ct = cos(t); val st = sin(t)
-            val x = c + r * sign(ct).toFloat() * abs(ct).pow(0.4).toFloat()
-            val y = c + r * sign(st).toFloat() * abs(st).pow(0.4).toFloat()
+            val x = c + r * sign(ct).toFloat() * abs(ct).pow(0.5).toFloat()
+            val y = c + r * sign(st).toFloat() * abs(st).pow(0.5).toFloat()
             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
         path.close()
@@ -115,6 +126,14 @@ object IconStyle {
         d.setBounds(0, 0, size, size)
         d.draw(Canvas(bmp))
         return bmp
+    }
+
+    /** ¿El ícono llena todo su cuadro con esquinas opacas (ícono cuadrado)? */
+    private fun isFullBleed(b: Bitmap): Boolean {
+        val e = 3
+        val n = b.width - 1 - e
+        return listOf(b.getPixel(e, e), b.getPixel(n, e), b.getPixel(e, n), b.getPixel(n, n))
+            .all { Color.alpha(it) > 200 }
     }
 
     private fun avg(b: Bitmap): Int {
@@ -129,6 +148,7 @@ object IconStyle {
     }
 
     private fun finish(c: Canvas, f: Float) {
+        // recorta con la forma redondeada (bordes suaves) y dibuja un borde fino
         val mask = Paint(Paint.ANTI_ALIAS_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) }
         c.drawPath(squircle(f), mask)
         c.restore()
@@ -149,8 +169,35 @@ object IconStyle {
 
     private fun render(d: Drawable, m: Int, tint: Int): Bitmap {
         val f = SIZE.toFloat()
-        if (m == ORIGINAL) return drawTo(d, SIZE)
+        val full = drawTo(d, SIZE)
+        if (m == ORIGINAL) return full
 
+        val gp = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        if (m == DARK) {
+            gp.colorFilter = ColorMatrixColorFilter(ColorMatrix(floatArrayOf(
+                .72f, 0f, 0f, 0f, 0f,  0f, .72f, 0f, 0f, 0f,  0f, 0f, .72f, 0f, 0f,  0f, 0f, 0f, 1f, 0f)))
+        } else if (m == TINT) {
+            val k = 1.25f
+            val tr = Color.red(tint) / 255f; val tg = Color.green(tint) / 255f; val tb = Color.blue(tint) / 255f
+            gp.colorFilter = ColorMatrixColorFilter(ColorMatrix(floatArrayOf(
+                tr * .299f * k, tr * .587f * k, tr * .114f * k, 0f, 0f,
+                tg * .299f * k, tg * .587f * k, tg * .114f * k, 0f, 0f,
+                tb * .299f * k, tb * .587f * k, tb * .114f * k, 0f, 0f,
+                0f, 0f, 0f, 1f, 0f)))
+        }
+
+        // Ícono cuadrado que llena todo su cuadro: se recorta redondeado y ocupa todo
+        if (isFullBleed(full)) {
+            val out = Bitmap.createBitmap(SIZE, SIZE, Bitmap.Config.ARGB_8888)
+            val c = Canvas(out)
+            c.saveLayer(0f, 0f, f, f, null)
+            c.drawBitmap(full, 0f, 0f, gp)
+            full.recycle()
+            finish(c, f)
+            return out
+        }
+
+        // Ícono con forma propia: va dentro de un recuadro con el estilo elegido
         val pad = (f * 0.14f).toInt()
         val glyph = drawTo(d, SIZE - 2 * pad)
         val out = Bitmap.createBitmap(SIZE, SIZE, Bitmap.Config.ARGB_8888)
@@ -166,26 +213,14 @@ object IconStyle {
         }
         val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { shader = LinearGradient(0f, 0f, f, f, c1, c2, Shader.TileMode.CLAMP) }
         c.drawRect(0f, 0f, f, f, bg)
-
-        val gp = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        if (m == DARK) {
-            gp.colorFilter = ColorMatrixColorFilter(ColorMatrix(floatArrayOf(
-                .72f, 0f, 0f, 0f, 0f,  0f, .72f, 0f, 0f, 0f,  0f, 0f, .72f, 0f, 0f,  0f, 0f, 0f, 1f, 0f)))
-        } else if (m == TINT) {
-            val k = 1.25f
-            val tr = Color.red(tint) / 255f; val tg = Color.green(tint) / 255f; val tb = Color.blue(tint) / 255f
-            gp.colorFilter = ColorMatrixColorFilter(ColorMatrix(floatArrayOf(
-                tr * .299f * k, tr * .587f * k, tr * .114f * k, 0f, 0f,
-                tg * .299f * k, tg * .587f * k, tg * .114f * k, 0f, 0f,
-                tb * .299f * k, tb * .587f * k, tb * .114f * k, 0f, 0f,
-                0f, 0f, 0f, 1f, 0f)))
-        }
         c.drawBitmap(glyph, pad.toFloat(), pad.toFloat(), gp)
         glyph.recycle()
+        full.recycle()
         finish(c, f)
         return out
     }
 
+    /** Vista del ícono ya con el estilo aplicado. El tamaño final lo pone quien la agrega (LayoutParams). */
     fun view(ctx: Context, pkg: String, sizeDp: Int, fallback: Drawable? = null): View {
         val custom = customFile(ctx, pkg)
         val m = modeFor(ctx, pkg)
