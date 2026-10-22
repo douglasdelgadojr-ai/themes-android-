@@ -1,11 +1,9 @@
 package com.douglas.temas
 
 import android.animation.ValueAnimator
-import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ResolveInfo
-import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
@@ -16,7 +14,6 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.GradientDrawable.Orientation.*
-import android.media.AudioManager
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.KeyEvent
@@ -34,9 +31,9 @@ class BjTheme : LauncherTheme {
     override val name = "BJ30"
 
     // Tamaños en dp. Si algo se ve chico o grande, cambia solo estos números.
-    private val RAIL_ICON = 60
-    private val CARD_ICON = 64
-    private val CARD_H = 150
+    private val RAIL_ICON = 72
+    private val CARD_ICON = 84
+    private val CARD_H = 170
 
     private var apps: List<ResolveInfo> = emptyList()
 
@@ -146,38 +143,6 @@ class BjTheme : LauncherTheme {
             setOnClickListener { onClick() }
         }
 
-    /** Mantén pulsado el ícono 🔊: prueba cómo responde el volumen de la radio y muestra el resultado. */
-    private fun probeVolume(ctx: Context, root: View) {
-        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val streams = listOf("Música" to AudioManager.STREAM_MUSIC, "Sistema" to AudioManager.STREAM_SYSTEM,
-            "Alarma" to AudioManager.STREAM_ALARM, "Notif." to AudioManager.STREAM_NOTIFICATION,
-            "Llamada" to AudioManager.STREAM_VOICE_CALL, "Timbre" to AudioManager.STREAM_RING)
-        fun snap() = streams.joinToString("\n") { "${it.first}: ${am.getStreamVolume(it.second)} / ${am.getStreamMaxVolume(it.second)}" }
-        val info = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · ${android.os.Build.HARDWARE} · Android ${android.os.Build.VERSION.RELEASE}"
-        val pk = try {
-            ctx.packageManager.getInstalledPackages(0).map { it.packageName }
-                .filter { p -> listOf("syu", "fyt", "mcu", "volume", "hct", "carset", "dsp").any { p.contains(it, true) } }.take(10).joinToString("\n")
-        } catch (e: Exception) { "" }
-        val before = snap()
-        val cur = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-        val target = if (cur > 0) cur - 1 else cur + 1
-        val log = StringBuilder()
-        try { am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0) } catch (e: Exception) { log.append("setStreamVolume: error ${e.javaClass.simpleName}\n") }
-        root.postDelayed({
-            val a = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-            log.append("setStreamVolume $cur→$target: quedó $a ${if (a == target) "OK" else "NO"}\n")
-            try { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, if (a <= cur) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, 0) } catch (e: Exception) { log.append("adjust: error ${e.javaClass.simpleName}\n") }
-            root.postDelayed({
-                val b = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                log.append("adjustStreamVolume desde $a: quedó $b ${if (b != a) "OK" else "NO"}\n")
-                try { am.setStreamVolume(AudioManager.STREAM_MUSIC, cur, 0) } catch (e: Exception) { }
-                AlertDialog.Builder(ctx).setTitle("Diagnóstico de volumen")
-                    .setMessage("$info\n\nAntes:\n$before\n\n$log\nPaquetes de la radio:\n${pk.ifEmpty { "(ninguno)" }}")
-                    .setPositiveButton("OK", null).show()
-            }, 700)
-        }, 700)
-    }
-
     override fun build(ctx: Context, host: ThemeHost): View {
         apps = ctx.packageManager.queryIntentActivities(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
@@ -194,7 +159,7 @@ class BjTheme : LauncherTheme {
         // ---- Barra lateral (4 accesos fijos) ----
         val rail = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         for (i in 0 until 4) rail.addView(slot(ctx, host, 10 + i, RAIL_ICON, false, false, true), LP(-1, 0, 1f))
-        top.addView(rail, LP(ctx.dp(84), -1))
+        top.addView(rail, LP(ctx.dp(92), -1))
 
         // ---- Reproductor (cambia según lo que suene: radio, CarPlay, música) ----
         val music = LinearLayout(ctx).apply {
@@ -235,43 +200,7 @@ class BjTheme : LauncherTheme {
 
         top.addView(right, LP(0, -1, 1.55f))
 
-        // ---- Barra inferior: apps (mantener = cambiar tema), volumen, temperatura, reloj ----
-        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val vol = SeekBar(ctx).apply {
-            max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            progress = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-            progressTintList = ColorStateList.valueOf(0xFFFF6A57.toInt())
-            thumbTintList = ColorStateList.valueOf(Color.WHITE)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                    if (fromUser) try { am.setStreamVolume(AudioManager.STREAM_MUSIC, p, 0) } catch (e: Exception) { }
-                }
-                override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {
-                    val want = s?.progress ?: return
-                    root.postDelayed({
-                        val got = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                        if (got != want) {
-                            // Plan B: pasos sueltos, como si fueran las teclas de volumen
-                            var n = Math.abs(want - got)
-                            val dir = if (want > got) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER
-                            while (n-- > 0) { try { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, 0) } catch (e: Exception) { break } }
-                            root.postDelayed({
-                                val g2 = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                                if (g2 != want) Toast.makeText(ctx, "La radio no aceptó el volumen (pedido $want, quedó $g2). Mantén pulsado el ícono 🔊 para diagnosticar", Toast.LENGTH_LONG).show()
-                            }, 500)
-                        }
-                    }, 400)
-                }
-            })
-        }
-        fun volBtn(t: String, dir: Int) = label(ctx, t, 32f).apply {
-            gravity = Gravity.CENTER
-            setOnClickListener {
-                try { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, AudioManager.FLAG_SHOW_UI) } catch (e: Exception) { }
-                vol.progress = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-            }
-        }
+        // ---- Barra inferior: apps (mantener = cambiar tema), temperatura y reloj ----
         val bar = LinearLayout(ctx).apply {
             gravity = Gravity.CENTER_VERTICAL; background = glass(ctx, 26)
             setPadding(ctx.dp(10), 0, ctx.dp(16), 0)
@@ -282,13 +211,7 @@ class BjTheme : LauncherTheme {
             setOnLongClickListener { host.nextTheme(); true }
         }
         bar.addView(appsBtn, LP(ctx.dp(84), -1))
-        bar.addView(LineIcon(ctx, LineIcon.Kind.VOL, 0xFF8097A0.toInt()).apply {
-            setOnLongClickListener { probeVolume(ctx, root); true }   // diagnóstico del volumen
-        }, LP(ctx.dp(34), ctx.dp(34)))
-        bar.addView(volBtn("−", AudioManager.ADJUST_LOWER), LP(ctx.dp(52), -1))
-        bar.addView(vol, LP(ctx.dp(260), -1))
-        bar.addView(volBtn("+", AudioManager.ADJUST_RAISE), LP(ctx.dp(52), -1))
-        bar.addView(View(ctx), LP(0, -1, 1f))   // empuja temperatura y reloj a la derecha
+        bar.addView(View(ctx), LP(0, -1, 1f))   // aquí irá la función nueva de la barra; por ahora empuja temperatura y reloj a la derecha
         val temp = label(ctx, "--°C", 21f, true).apply { gravity = Gravity.CENTER }
         bar.addView(temp, LP(ctx.dp(84), -1))
         fetchWeather(root, temp)
@@ -297,7 +220,7 @@ class BjTheme : LauncherTheme {
         }, LP(ctx.dp(120), -1))
         root.addView(bar, LP(-1, ctx.dp(84)).apply { topMargin = ctx.dp(14) })
 
-        // Actualiza música y volumen cada segundo mientras la pantalla exista
+        // Actualiza la música cada segundo mientras la pantalla exista
         val tick = object : Runnable {
             override fun run() {
                 if (!root.isAttachedToWindow) return
@@ -322,7 +245,6 @@ class BjTheme : LauncherTheme {
                     if (np.pkg.isNotEmpty()) music.setOnClickListener { host.launch(np.pkg) }
                     else { music.setOnClickListener(null); music.isClickable = false }
                 }
-                if (!vol.isPressed) vol.progress = am.getStreamVolume(AudioManager.STREAM_MUSIC)
                 root.postDelayed(this, 1000)
             }
         }
