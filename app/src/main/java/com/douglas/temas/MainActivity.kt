@@ -17,7 +17,11 @@ import android.media.MediaMetadata
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.net.Uri
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.*
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.*
 import java.io.FileOutputStream
 
@@ -30,6 +34,9 @@ class MainActivity : Activity(), ThemeHost {
     private var drawerGrid: GridView? = null
     private var drawerStyleBtn: TextView? = null
     private var drawerTintBtn: TextView? = null
+    private var drawerTab = 0                 // 0 = Todas, 1 = Recientes, 2 = Favoritas
+    private var drawerQuery = ""
+    private var drawerRefresh: (() -> Unit)? = null
     private var projectionPkg: String? = null   // app de proyección (CarPlay/RLink...) abierta por última vez
     private var iconPickPkg: String? = null
     private var needsRebuild = false
@@ -95,6 +102,26 @@ class MainActivity : Activity(), ThemeHost {
         root.addView(homeBanner, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(6) })
     }
 
+    // ---- Favoritas y recientes (para el cajón de apps) ----
+    private fun readList(key: String): MutableList<String> =
+        (prefs.getString(key, "") ?: "").split(",").filter { it.isNotEmpty() }.toMutableList()
+
+    private fun favs(): MutableList<String> = readList("fav_apps")
+    private fun recents(): MutableList<String> = readList("recent_apps")
+
+    private fun pushRecent(pkg: String) {
+        val l = recents()
+        l.remove(pkg); l.add(0, pkg)
+        prefs.edit().putString("recent_apps", l.take(12).joinToString(",")).apply()
+    }
+
+    private fun toggleFav(pkg: String) {
+        val l = favs()
+        if (l.contains(pkg)) l.remove(pkg) else l.add(pkg)
+        prefs.edit().putString("fav_apps", l.joinToString(",")).apply()
+        drawerRefresh?.invoke()
+    }
+
     // ---- ThemeHost ----
     override fun launch(pkg: String?) {
         val i = pkg?.let { packageManager.getLaunchIntentForPackage(it) }
@@ -103,6 +130,7 @@ class MainActivity : Activity(), ThemeHost {
             return
         }
         if (pkg != null && isProjection(pkg)) projectionPkg = pkg
+        if (pkg != null) pushRecent(pkg)
         try { startActivity(i) }
         catch (e: Exception) { Toast.makeText(this, "No se pudo abrir la app", Toast.LENGTH_SHORT).show() }
     }
@@ -132,6 +160,22 @@ class MainActivity : Activity(), ThemeHost {
         return listOf("bluetooth", "btmusic", "bt music", "a2dp").any { k.contains(it) }
     }
 
+    /** Paquete de la app que está sacando audio ahora (Android 8+; usa un método oculto, por eso la reflexión). */
+    private fun audioSourcePkg(am: AudioManager): String? = try {
+        val cfgs = AudioManager::class.java.getMethod("getActivePlaybackConfigurations").invoke(am) as? List<*>
+        var found: String? = null
+        if (cfgs != null) {
+            for (cfg in cfgs) {
+                if (cfg == null) continue
+                val uid = cfg.javaClass.getMethod("getClientUid").invoke(cfg) as Int
+                val pkgs = packageManager.getPackagesForUid(uid) ?: continue
+                val p = pkgs.firstOrNull { it != packageName && it != "android" }
+                if (p != null) { found = p; break }
+            }
+        }
+        found
+    } catch (e: Throwable) { null }
+
     private fun fromSession(c: android.media.session.MediaController, playing: Boolean): NowPlaying {
         val m = c.metadata
         return NowPlaying(
@@ -149,8 +193,9 @@ class MainActivity : Activity(), ThemeHost {
         val all = msm.getActiveSessions(ComponentName(this, MediaListener::class.java))
         val musicOn = am.isMusicActive
         if (!musicOn) projectionPkg = null           // ya no suena nada: olvida la proyección
-        val proj = projectionPkg
-        // Con CarPlay/RLink abierto, una sesión vieja de Bluetooth no cuenta
+        val src = if (musicOn) audioSourcePkg(am) else null   // quién está sacando el audio de verdad
+        val proj = projectionPkg ?: src?.takeIf { isProjection(it) }
+        // Con CarPlay/RLink sonando, una sesión vieja de Bluetooth no cuenta
         val list = if (proj != null) all.filter { !isBluetoothSession(it.packageName) } else all
         val playing = list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
         when {
@@ -165,6 +210,7 @@ class MainActivity : Activity(), ThemeHost {
                     else -> NowPlaying(appLabelOf(proj).ifEmpty { "Proyección" }, "Reproduciendo", true, null, proj, "PROYECCIÓN")
                 }
             }
+            musicOn && src != null -> NowPlaying("", "", true, null, src)   // app sin sesión de música (radio, etc.)
             musicOn -> NowPlaying("Reproduciendo", "", true, null)
             list.isNotEmpty() -> fromSession(list.first(), false)
             else -> NowPlaying("Sin reproducción", "", false, null)
@@ -181,78 +227,174 @@ class MainActivity : Activity(), ThemeHost {
         catch (e: Exception) { Toast.makeText(this, "No disponible", Toast.LENGTH_SHORT).show() }
     }
 
+    // ---- Cajón de apps ----
+    private fun glassTile(r: Int) = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0x1CFFFFFF, 0x08FFFFFF)).apply {
+        cornerRadius = dp(r).toFloat(); setStroke(dp(1).coerceAtLeast(1), 0x14FFFFFF)
+    }
+
+    private fun styleChip(c: TextView, on: Boolean) {
+        c.background = GradientDrawable().apply {
+            cornerRadius = dp(22).toFloat()
+            if (on) setColor(0xFFFF6A57.toInt()) else { setColor(0x14FFFFFF); setStroke(dp(1).coerceAtLeast(1), 0x1FFFFFFF) }
+        }
+        c.setTextColor(if (on) Color.WHITE else 0xFFB0BEC5.toInt())
+    }
+
+    private fun chip(text: String, on: Boolean, onClick: () -> Unit): TextView = label(this, text, 15f).apply {
+        gravity = Gravity.CENTER
+        setPadding(dp(18), dp(9), dp(18), dp(9))
+        styleChip(this, on)
+        setOnClickListener { onClick() }
+    }
+
     override fun openDrawer() {
         if (drawer != null) return
         val pm = packageManager
-        val apps: List<ResolveInfo> = pm.queryIntentActivities(
+        val items: List<Pair<ResolveInfo, String>> = pm.queryIntentActivities(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
         ).filter { it.activityInfo.packageName != packageName }
-            .sortedBy { it.loadLabel(pm).toString().lowercase() }
+            .map { it to it.loadLabel(pm).toString() }
+            .sortedBy { it.second.lowercase() }
+
+        drawerTab = 0; drawerQuery = ""
+        var shown: List<Pair<ResolveInfo, String>> = items
+
+        val tile = { glassTile(22) }
 
         val grid = GridView(this).apply {
-            numColumns = 6; verticalSpacing = dp(26); stretchMode = GridView.STRETCH_COLUMN_WIDTH
-            setPadding(dp(28), dp(14), dp(28), dp(24)); clipToPadding = false
-            selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            numColumns = 6; horizontalSpacing = dp(14); verticalSpacing = dp(14)
+            stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            setPadding(dp(28), dp(4), dp(28), dp(24)); clipToPadding = false
+            isFastScrollEnabled = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+            selector = GradientDrawable().apply { cornerRadius = dp(22).toFloat(); setColor(0x33FFFFFF) }
+            setDrawSelectorOnTop(true)
             adapter = object : BaseAdapter() {
-                override fun getCount() = apps.size
-                override fun getItem(p: Int) = apps[p]
+                override fun getCount() = shown.size
+                override fun getItem(p: Int) = shown[p]
                 override fun getItemId(p: Int) = p.toLong()
                 override fun getView(p: Int, v: View?, parent: ViewGroup): View {
-                    val ri = apps[p]
+                    val (ri, lbl) = shown[p]
                     val pkg = ri.activityInfo.packageName
+                    val isFav = favs().contains(pkg)
                     return LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-                        addView(IconStyle.view(this@MainActivity, pkg, 76, ri.loadIcon(pm)),
-                            LinearLayout.LayoutParams(dp(76), dp(76)))
-                        addView(label(context, ri.loadLabel(pm).toString(), 13f).apply {
+                        layoutParams = AbsListView.LayoutParams(AbsListView.LayoutParams.MATCH_PARENT, dp(136))
+                        background = tile()
+                        val iconBox = FrameLayout(this@MainActivity)
+                        iconBox.addView(IconStyle.view(this@MainActivity, pkg, 84, ri.loadIcon(pm)),
+                            FrameLayout.LayoutParams(dp(84), dp(84), Gravity.CENTER))
+                        if (isFav) iconBox.addView(label(this@MainActivity, "★", 16f).apply { setTextColor(0xFFFFC857.toInt()) },
+                            FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
+                        addView(iconBox, LinearLayout.LayoutParams(dp(100), dp(88)))
+                        addView(label(this@MainActivity, lbl, 13f).apply {
                             maxLines = 1; gravity = Gravity.CENTER
                             ellipsize = android.text.TextUtils.TruncateAt.END
-                            setTextColor(0xFFB0BEC5.toInt())
-                        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+                            setTextColor(0xFFD5E0E6.toInt())
+                        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6); leftMargin = dp(6); rightMargin = dp(6) })
                     }
                 }
             }
             setOnItemClickListener { _, _, p, _ ->
-                val pkg = apps[p].activityInfo.packageName
+                val pkg = shown[p].first.activityInfo.packageName
                 if (pickSlot >= 0) {
                     prefs.edit().putString("dock_$pickSlot", pkg).apply(); pickSlot = -1
                     rebuild()
                 } else { closeDrawer(); launch(pkg) }
             }
-            setOnItemLongClickListener { _, _, p, _ -> iconMenu(apps[p]); true }
+            setOnItemLongClickListener { _, _, p, _ -> iconMenu(shown[p].first); true }
         }
         drawerGrid = grid
-        val bar = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(28), dp(12), dp(28), dp(4))
-            addView(label(context, if (pickSlot >= 0) "Elige app para el dock" else "Aplicaciones", 20f, true),
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (pickSlot >= 0) addView(label(context, "Quitar icono", 18f).apply {
-                setPadding(0, 0, dp(24), 0)
-                setOnClickListener { val s = pickSlot; closeDrawer(); clearSlot(s) }
+
+        val empty = label(this, "", 17f).apply {
+            setTextColor(0xFF8097A0.toInt()); gravity = Gravity.CENTER; visibility = View.GONE
+        }
+        val count = label(this, "${items.size}", 16f).apply { setTextColor(0xFF8097A0.toInt()) }
+
+        fun applyFilter() {
+            val q = drawerQuery.trim().lowercase()
+            val base: List<Pair<ResolveInfo, String>> = when (drawerTab) {
+                1 -> recents().mapNotNull { p -> items.firstOrNull { it.first.activityInfo.packageName == p } }
+                2 -> { val f = favs(); items.filter { f.contains(it.first.activityInfo.packageName) } }
+                else -> items
+            }
+            shown = if (q.isEmpty()) base else base.filter { it.second.lowercase().contains(q) }
+            (grid.adapter as? BaseAdapter)?.notifyDataSetChanged()
+            empty.visibility = if (shown.isEmpty()) View.VISIBLE else View.GONE
+            empty.text = when {
+                q.isNotEmpty() -> "Ninguna app coincide con «${drawerQuery.trim()}»"
+                drawerTab == 1 -> "Todavía no has abierto apps"
+                drawerTab == 2 -> "Mantén pulsada una app para añadirla a favoritas"
+                else -> ""
+            }
+            count.text = "${shown.size}"
+        }
+        drawerRefresh = { applyFilter() }
+
+        // ---- Fila 1: título, contador y cerrar ----
+        val row1 = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(28), dp(14), dp(28), dp(4))
+            addView(label(this@MainActivity, if (pickSlot >= 0) "Elige app para el dock" else "Aplicaciones", 24f, true))
+            addView(count, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12); topMargin = dp(4) })
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
+            addView(label(this@MainActivity, "✕", 20f).apply {
+                gravity = Gravity.CENTER
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x1AFFFFFF) }
+                setOnClickListener { closeDrawer() }
+            }, LinearLayout.LayoutParams(dp(46), dp(46)))
+        }
+
+        // ---- Fila 2: pestañas, buscador y estilo de íconos ----
+        val row2 = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(28), dp(8), dp(28), dp(12)) }
+        val chips = ArrayList<TextView>()
+        fun restyle() { chips.forEachIndexed { i, c -> styleChip(c, i == drawerTab) } }
+        listOf("Todas", "Recientes", "Favoritas").forEachIndexed { i, n ->
+            val c = chip(n, i == 0) { drawerTab = i; restyle(); applyFilter(); grid.setSelection(0) }
+            chips.add(c)
+            row2.addView(c, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        }
+        val search = EditText(this).apply {
+            hint = "Buscar app"; setHintTextColor(0x88FFFFFF.toInt()); setTextColor(Color.WHITE); textSize = 16f
+            setSingleLine(true); imeOptions = EditorInfo.IME_ACTION_DONE
+            background = glassTile(22)
+            setPadding(dp(18), 0, dp(18), 0)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: Editable?) { drawerQuery = s?.toString() ?: ""; applyFilter() }
             })
-            val styleBtn = label(context, "Íconos: ${IconStyle.modeName(this@MainActivity)}", 18f).apply {
-                setPadding(0, 0, dp(24), 0)
-                setOnClickListener { IconStyle.cycle(this@MainActivity); refreshDrawerIcons() }
-            }
-            drawerStyleBtn = styleBtn
-            addView(styleBtn)
-            val tintBtn = label(context, "Tinte: ${IconStyle.tintName(this@MainActivity)}", 18f).apply {
-                setPadding(0, 0, dp(24), 0)
-                setOnClickListener { tintMenu() }
-            }
-            drawerTintBtn = tintBtn
-            addView(tintBtn)
-            addView(label(context, "Cerrar ✕", 18f).apply { setOnClickListener { closeDrawer() } })
         }
-        drawer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFF050608.toInt())
-            addView(bar); addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
+        row2.addView(search, LinearLayout.LayoutParams(0, dp(44), 1f).apply { leftMargin = dp(4); rightMargin = dp(12) })
+        if (pickSlot >= 0) row2.addView(chip("Quitar ícono", false) { val s = pickSlot; closeDrawer(); clearSlot(s) },
+            LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        val styleBtn = chip("Íconos: ${IconStyle.modeName(this)}", false) { IconStyle.cycle(this); refreshDrawerIcons() }
+        drawerStyleBtn = styleBtn
+        row2.addView(styleBtn, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        val tintBtn = chip("Tinte: ${IconStyle.tintName(this)}", false) { tintMenu() }
+        drawerTintBtn = tintBtn
+        row2.addView(tintBtn, LinearLayout.LayoutParams(-2, -2))
+
+        val body = FrameLayout(this).apply {
+            addView(grid, FrameLayout.LayoutParams(-1, -1))
+            addView(empty, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
         }
-        root.addView(drawer, FrameLayout.LayoutParams(-1, -1))
+        val d = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xFF0F1D24.toInt(), 0xFF050608.toInt()))
+            isFocusable = true; isFocusableInTouchMode = true     // para que el buscador no abra el teclado solo
+            addView(row1); addView(row2); addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+            alpha = 0f
+        }
+        drawer = d
+        root.addView(d, FrameLayout.LayoutParams(-1, -1))
+        d.requestFocus()
+        d.animate().alpha(1f).setDuration(180).start()
     }
 
     private fun closeDrawer() {
-        drawer?.let { root.removeView(it) }; drawer = null; drawerGrid = null; drawerStyleBtn = null; drawerTintBtn = null; pickSlot = -1
+        try { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(root.windowToken, 0) } catch (e: Exception) { }
+        drawer?.let { root.removeView(it) }; drawer = null; drawerGrid = null; drawerStyleBtn = null; drawerTintBtn = null
+        drawerRefresh = null; pickSlot = -1
         if (needsRebuild) { needsRebuild = false; rebuild() }
     }
 
@@ -272,6 +414,7 @@ class MainActivity : Activity(), ThemeHost {
         val hasOwnStyle = IconStyle.appMode(this, pkg) >= 0
         val items = ArrayList<String>()
         val acts = ArrayList<() -> Unit>()
+        items.add(if (favs().contains(pkg)) "Quitar de favoritas" else "Añadir a favoritas"); acts.add { toggleFav(pkg) }
         items.add("Estilo de este ícono…"); acts.add { styleMenu(pkg, name) }
         items.add(if (hasCustom) "Elegir otra imagen…" else "Elegir imagen…"); acts.add { pickIcon(pkg) }
         if (hasCustom || hasOwnStyle) {
