@@ -35,7 +35,12 @@ interface ThemeHost {
     fun openSettings(action: String)
 }
 
-data class NowPlaying(val title: String, val artist: String, val playing: Boolean, val art: Bitmap?, val pkg: String = "", val source: String = "")
+/** pos/dur en milisegundos; posAt = SystemClock.elapsedRealtime() cuando se midió pos; speed = velocidad de reproducción. dur = 0 si no se conoce. */
+data class NowPlaying(
+    val title: String, val artist: String, val playing: Boolean, val art: Bitmap?,
+    val pkg: String = "", val source: String = "",
+    val pos: Long = -1L, val dur: Long = 0L, val posAt: Long = 0L, val speed: Float = 1f
+)
 
 fun Context.dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
