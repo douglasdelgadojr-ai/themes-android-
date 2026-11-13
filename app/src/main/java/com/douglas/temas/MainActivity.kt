@@ -115,11 +115,13 @@ class MainActivity : Activity(), ThemeHost {
         prefs.edit().putString("recent_apps", l.take(12).joinToString(",")).apply()
     }
 
-    private fun toggleFav(pkg: String) {
+    private fun toggleFav(pkg: String, quiet: Boolean = false) {
         val l = favs()
         if (l.contains(pkg)) l.remove(pkg) else l.add(pkg)
         prefs.edit().putString("fav_apps", l.joinToString(",")).apply()
-        drawerRefresh?.invoke()
+        // quiet = tocar la ★ en el cajón: solo repinta (sin repetir la animación), salvo en la pestaña Favoritas
+        if (quiet && drawerTab != 2) (drawerGrid?.adapter as? BaseAdapter)?.notifyDataSetChanged()
+        else drawerRefresh?.invoke()
     }
 
     // ---- ThemeHost ----
@@ -178,12 +180,16 @@ class MainActivity : Activity(), ThemeHost {
 
     private fun fromSession(c: android.media.session.MediaController, playing: Boolean): NowPlaying {
         val m = c.metadata
+        val st = c.playbackState
         return NowPlaying(
             m?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: m?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: "",
             m?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: m?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: "",
             playing,
-            m?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART),
-            c.packageName
+            m?.getBitmap(MediaMetadata.METADATA_KEY_ART) ?: m?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                ?: m?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON),
+            c.packageName, "",
+            st?.position ?: -1L, m?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L,
+            st?.lastPositionUpdateTime ?: 0L, st?.playbackSpeed ?: 1f
         )
     }
 
@@ -260,6 +266,14 @@ class MainActivity : Activity(), ThemeHost {
         var shown: List<Pair<ResolveInfo, String>> = items
 
         val tile = { glassTile(22) }
+        var tilesAnim = true     // los íconos entran uno tras otro cuando se abre el cajón o cambia el filtro
+
+        fun choose(pkg: String) {
+            if (pickSlot >= 0) {
+                prefs.edit().putString("dock_$pickSlot", pkg).apply(); pickSlot = -1
+                rebuild()
+            } else { closeDrawer(); launch(pkg) }
+        }
 
         val grid = GridView(this).apply {
             numColumns = 6; horizontalSpacing = dp(14); verticalSpacing = dp(14)
@@ -284,24 +298,26 @@ class MainActivity : Activity(), ThemeHost {
                         val iconBox = FrameLayout(this@MainActivity)
                         iconBox.addView(IconStyle.view(this@MainActivity, pkg, 84, ri.loadIcon(pm)),
                             FrameLayout.LayoutParams(dp(84), dp(84), Gravity.CENTER))
-                        if (isFav) iconBox.addView(label(this@MainActivity, "★", 16f).apply { setTextColor(0xFFFFC857.toInt()) },
-                            FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
+                        iconBox.addView(label(this@MainActivity, "★", 18f).apply {
+                            setTextColor(if (isFav) 0xFFFFC857.toInt() else 0x47FFFFFF)
+                            setPadding(dp(8), dp(2), dp(2), dp(8))
+                            setOnClickListener { toggleFav(pkg, true) }
+                        }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
                         addView(iconBox, LinearLayout.LayoutParams(dp(100), dp(88)))
                         addView(label(this@MainActivity, lbl, 13f).apply {
                             maxLines = 1; gravity = Gravity.CENTER
                             ellipsize = android.text.TextUtils.TruncateAt.END
                             setTextColor(0xFFD5E0E6.toInt())
                         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6); leftMargin = dp(6); rightMargin = dp(6) })
+                    }.also { item ->
+                        if (tilesAnim && p < 30) {
+                            item.alpha = 0f; item.translationY = dp(10).toFloat()
+                            item.animate().alpha(1f).translationY(0f).setStartDelay(p * 22L).setDuration(260).start()
+                        }
                     }
                 }
             }
-            setOnItemClickListener { _, _, p, _ ->
-                val pkg = shown[p].first.activityInfo.packageName
-                if (pickSlot >= 0) {
-                    prefs.edit().putString("dock_$pickSlot", pkg).apply(); pickSlot = -1
-                    rebuild()
-                } else { closeDrawer(); launch(pkg) }
-            }
+            setOnItemClickListener { _, _, p, _ -> choose(shown[p].first.activityInfo.packageName) }
             setOnItemLongClickListener { _, _, p, _ -> iconMenu(shown[p].first); true }
         }
         drawerGrid = grid
@@ -311,7 +327,16 @@ class MainActivity : Activity(), ThemeHost {
         }
         val count = label(this, "${items.size}", 16f).apply { setTextColor(0xFF8097A0.toInt()) }
 
+        // Fila de recientes (solo en «Todas» y sin búsqueda)
+        val recBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(28), dp(2), dp(28), dp(10)); visibility = View.GONE }
+        val recRow = LinearLayout(this)
+        recBox.addView(label(this, "RECIENTES", 11f, true).apply { setTextColor(0xFF8097A0.toInt()); letterSpacing = 0.15f },
+            LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(8) })
+        recBox.addView(recRow)
+
         fun applyFilter() {
+            tilesAnim = true
+            grid.postDelayed({ tilesAnim = false }, 900)
             val q = drawerQuery.trim().lowercase()
             val base: List<Pair<ResolveInfo, String>> = when (drawerTab) {
                 1 -> recents().mapNotNull { p -> items.firstOrNull { it.first.activityInfo.packageName == p } }
@@ -328,6 +353,24 @@ class MainActivity : Activity(), ThemeHost {
                 else -> ""
             }
             count.text = "${shown.size}"
+
+            val rec = if (drawerTab == 0 && q.isEmpty()) recents().take(6).mapNotNull { p -> items.firstOrNull { it.first.activityInfo.packageName == p } } else emptyList()
+            recRow.removeAllViews()
+            rec.forEachIndexed { i, (ri, lbl) ->
+                val pkg = ri.activityInfo.packageName
+                recRow.addView(LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                    setOnClickListener { choose(pkg) }
+                    addView(IconStyle.view(this@MainActivity, pkg, 56, ri.loadIcon(pm)), LinearLayout.LayoutParams(dp(56), dp(56)))
+                    addView(label(this@MainActivity, lbl, 12f).apply {
+                        maxLines = 1; gravity = Gravity.CENTER; ellipsize = android.text.TextUtils.TruncateAt.END
+                        setTextColor(0xFFB0BEC5.toInt())
+                    }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+                    alpha = 0f; translationY = dp(8).toFloat()
+                    animate().alpha(1f).translationY(0f).setStartDelay(i * 30L).setDuration(260).start()
+                }, LinearLayout.LayoutParams(dp(84), -2))
+            }
+            recBox.visibility = if (rec.isEmpty()) View.GONE else View.VISIBLE
         }
         drawerRefresh = { applyFilter() }
 
@@ -382,13 +425,17 @@ class MainActivity : Activity(), ThemeHost {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xFF0F1D24.toInt(), 0xFF050608.toInt()))
             isFocusable = true; isFocusableInTouchMode = true     // para que el buscador no abra el teclado solo
-            addView(row1); addView(row2); addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+            addView(row1); addView(row2); addView(recBox); addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
             alpha = 0f
         }
         drawer = d
         root.addView(d, FrameLayout.LayoutParams(-1, -1))
         d.requestFocus()
-        d.animate().alpha(1f).setDuration(180).start()
+        // abre con un zoom suave desde la esquina del botón ▦
+        d.pivotX = dp(40).toFloat(); d.pivotY = root.height.toFloat().coerceAtLeast(1f)
+        d.scaleX = 0.96f; d.scaleY = 0.96f
+        d.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(260).start()
+        applyFilter()      // pinta la fila de recientes y arranca la entrada de los íconos
     }
 
     private fun closeDrawer() {
