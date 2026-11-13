@@ -1,19 +1,24 @@
 package com.douglas.temas
 
+import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ResolveInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Paint
+import android.graphics.Matrix
 import android.graphics.Path
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.GradientDrawable.Orientation.*
+import android.os.SystemClock
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.KeyEvent
@@ -21,6 +26,49 @@ import android.view.View
 import android.view.animation.LinearInterpolator
 import android.widget.*
 import android.widget.LinearLayout.LayoutParams as LP
+
+/** Cambia el texto solo si es distinto (así no se reinicia el desplazamiento del título largo). */
+private fun TextView.setIfChanged(s: CharSequence) { if (text.toString() != s.toString()) text = s }
+
+/** Entrada suave: aparece subiendo unos píxeles. */
+private fun animIn(v: View) {
+    v.alpha = 0f; v.translationY = v.context.dp(8).toFloat()
+    v.animate().alpha(1f).translationY(0f).setDuration(350).start()
+}
+
+private fun fmtTime(ms: Long): String { val s = ms / 1000; return "${s / 60}:${(s % 60).toString().padStart(2, '0')}" }
+
+/** Color dominante de la carátula (favorece colores saturados ni muy claros ni muy oscuros). */
+private fun dominantColor(src: Bitmap): Int {
+    val s = Bitmap.createScaledBitmap(src, 24, 24, true)
+    var r = 0.0; var g = 0.0; var bl = 0.0; var w = 0.0
+    for (y in 0 until 24) for (x in 0 until 24) {
+        val px = s.getPixel(x, y)
+        val rr = Color.red(px); val gg = Color.green(px); val bb = Color.blue(px)
+        val hi = maxOf(rr, gg, bb); val lo = minOf(rr, gg, bb)
+        val sat = (hi - lo).toDouble() / (if (hi == 0) 1 else hi)
+        val lum = (rr + gg + bb) / 765.0
+        val k = sat * maxOf(0.05, 1 - Math.abs(lum - 0.5) * 1.4) + 0.02
+        r += rr * k; g += gg * k; bl += bb * k; w += k
+    }
+    if (s !== src) s.recycle()
+    return Color.rgb((r / w).toInt(), (g / w).toInt(), (bl / w).toInt())
+}
+
+/** Barra de progreso delgada con extremos redondeados. */
+class SlimBar(ctx: Context) : View(ctx) {
+    var frac: Float = 0f
+        set(v) { field = v.coerceIn(0f, 1f); invalidate() }
+    var color: Int = 0xFFFF6A57.toInt()
+        set(v) { field = v; invalidate() }
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val r = RectF()
+    override fun onDraw(c: Canvas) {
+        val h = height.toFloat(); val rad = h / 2f
+        p.color = 0x2EFFFFFF; r.set(0f, 0f, width.toFloat(), h); c.drawRoundRect(r, rad, rad, p)
+        if (frac > 0f) { p.color = color; r.set(0f, 0f, width * frac, h); c.drawRoundRect(r, rad, rad, p) }
+    }
+}
 
 /**
  * Tema BJ30 (oscuro): barra lateral fija, reproductor con planeta que cambia según la fuente
@@ -162,16 +210,18 @@ class BjTheme : LauncherTheme {
         top.addView(rail, LP(ctx.dp(92), -1))
 
         // ---- Reproductor (cambia según lo que suene: radio, CarPlay, música) ----
+        val musicBg = glass(ctx, 28)     // se tiñe con el color de la carátula
         val music = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
             setPadding(ctx.dp(16), ctx.dp(16), ctx.dp(16), ctx.dp(16))
-            background = glass(ctx, 28)
+            background = musicBg
         }
         val source = label(ctx, "REPRODUCTOR", 11f, true).apply {
             setTextColor(0xFF8097A0.toInt()); letterSpacing = 0.15f; gravity = Gravity.CENTER
         }
         val title = label(ctx, "—", 22f, true).apply {
-            maxLines = 1; ellipsize = TextUtils.TruncateAt.END; gravity = Gravity.CENTER
+            setSingleLine(true); ellipsize = TextUtils.TruncateAt.MARQUEE; marqueeRepeatLimit = -1   // título largo: se desplaza
+            isSelected = true; gravity = Gravity.CENTER
         }
         val artist = label(ctx, "", 15f).apply {
             setTextColor(0xFF8097A0.toInt()); maxLines = 1; ellipsize = TextUtils.TruncateAt.END; gravity = Gravity.CENTER
@@ -181,6 +231,18 @@ class BjTheme : LauncherTheme {
         music.addView(title, LP(-1, -2))
         music.addView(artist, LP(-1, -2))
         music.addView(planet, LP(-1, 0, 1f).apply { setMargins(0, ctx.dp(6), 0, ctx.dp(6)) })
+
+        // ---- Progreso: tiempo transcurrido, barra y duración (se oculta si la fuente no da duración) ----
+        val elapsed = label(ctx, "0:00", 12f).apply { setTextColor(0xFFB0BEC5.toInt()) }
+        val total = label(ctx, "0:00", 12f).apply { setTextColor(0xFFB0BEC5.toInt()) }
+        val slim = SlimBar(ctx)
+        val progressRow = LinearLayout(ctx).apply {
+            gravity = Gravity.CENTER_VERTICAL; visibility = View.GONE
+            addView(elapsed)
+            addView(slim, LP(0, ctx.dp(4), 1f).apply { setMargins(ctx.dp(8), 0, ctx.dp(8), 0) })
+            addView(total)
+        }
+        music.addView(progressRow, LP(-1, -2).apply { bottomMargin = ctx.dp(8) })
 
         val ctl = LinearLayout(ctx).apply { gravity = Gravity.CENTER }
         fun btnLP(size: Int) = LP(ctx.dp(size), ctx.dp(size)).apply { setMargins(ctx.dp(10), 0, ctx.dp(10), 0) }
@@ -220,25 +282,68 @@ class BjTheme : LauncherTheme {
         }, LP(ctx.dp(120), -1))
         root.addView(bar, LP(-1, ctx.dp(84)).apply { topMargin = ctx.dp(14) })
 
+        // ---- Color del reproductor según la carátula (fondo de la tarjeta, borde y barra de progreso) ----
+        val neutral = intArrayOf(0x22FFFFFF, 0x0CFFFFFF, 0x1CFFFFFF, 0xFFFF6A57.toInt())
+        val tintCur = neutral.copyOf()
+        var tintAnim: ValueAnimator? = null
+        fun paintTint() {
+            musicBg.setColors(intArrayOf(tintCur[0], tintCur[1]))
+            musicBg.setStroke(ctx.dp(1).coerceAtLeast(1), tintCur[2])
+            slim.color = tintCur[3]
+        }
+        fun applyTint(c: Int?) {
+            val rgb = (c ?: 0) and 0xFFFFFF
+            val to = if (c == null) neutral
+                     else intArrayOf((0x99 shl 24) or rgb, (0x29 shl 24) or rgb, (0x80 shl 24) or rgb, (0xFF shl 24) or rgb)
+            val from = tintCur.copyOf()
+            tintAnim?.cancel()
+            val ev = ArgbEvaluator()
+            tintAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 600
+                addUpdateListener { a ->
+                    val t = a.animatedValue as Float
+                    for (i in 0..3) tintCur[i] = ev.evaluate(t, from[i], to[i]) as Int
+                    paintTint()
+                }
+                start()
+            }
+        }
+
         // Actualiza la música cada segundo mientras la pantalla exista
+        var lastNp: NowPlaying? = null
+        var lastKey = ""
+        var hadArt = false
         val tick = object : Runnable {
             override fun run() {
                 if (!root.isAttachedToWindow) return
                 val np = host.nowPlaying()
+                lastNp = np
                 if (np == null) {
-                    title.text = "Dar acceso a la música"; artist.text = "Toca aquí y activa «Temas»"
+                    title.setIfChanged("Dar acceso a la música"); artist.setIfChanged("Toca aquí y activa «Temas»")
                     music.setOnClickListener { host.requestMediaAccess() }
                     planet.setPlaying(false)
+                    if (hadArt) { hadArt = false; planet.setCover(null); applyTint(null) }
                 } else {
                     val lbl = if (np.pkg.isEmpty()) "" else appLabel(ctx, np.pkg)
+                    // canción nueva: el título y el artista entran con una animación
+                    val key = np.pkg + "|" + np.title + "|" + np.artist
+                    val changed = key != lastKey
+                    if (changed) { lastKey = key; animIn(title); animIn(artist) }
                     if (np.source.isNotEmpty()) {
                         // fuente sin sesión de música (CarPlay, Android Auto...)
-                        source.text = np.source; title.textSize = 22f; title.text = np.title; artist.text = np.artist
+                        source.setIfChanged(np.source); title.textSize = 22f; title.setIfChanged(np.title); artist.setIfChanged(np.artist)
                     } else {
                         val radio = np.pkg.contains("radio", true) || np.pkg.contains("tuner", true) || lbl.contains("radio", true)
-                        source.text = if (np.pkg.isEmpty()) "REPRODUCTOR" else if (radio) "RADIO" else lbl.uppercase()
+                        source.setIfChanged(if (np.pkg.isEmpty()) "REPRODUCTOR" else if (radio) "RADIO" else lbl.uppercase())
                         title.textSize = if (radio) 40f else 22f
-                        title.text = np.title.ifEmpty { if (np.playing) lbl.ifEmpty { "Reproduciendo" } else "Sin reproducción" }; artist.text = np.artist
+                        title.setIfChanged(np.title.ifEmpty { if (np.playing) lbl.ifEmpty { "Reproduciendo" } else "Sin reproducción" }); artist.setIfChanged(np.artist)
+                    }
+                    // carátula dentro del círculo (si la canción no trae, vuelve el planeta) y color del reproductor
+                    val art = np.art
+                    if (changed || (art != null) != hadArt) {
+                        hadArt = art != null
+                        planet.setCover(art)
+                        applyTint(if (art != null) dominantColor(art) else null)
                     }
                     playIcon.set(if (np.playing) TransportIcon.Kind.PAUSE else TransportIcon.Kind.PLAY)
                     planet.setPlaying(np.playing)
@@ -248,6 +353,23 @@ class BjTheme : LauncherTheme {
                 root.postDelayed(this, 1000)
             }
         }
+        // Progreso: se actualiza cada medio segundo con lo último leído (sin volver a preguntarle al sistema)
+        val prog = object : Runnable {
+            override fun run() {
+                if (!root.isAttachedToWindow) return
+                val n = lastNp
+                if (n != null && n.dur > 0 && n.source.isEmpty()) {
+                    var pos = if (n.pos < 0) 0L else n.pos
+                    if (n.playing && n.pos >= 0 && n.posAt > 0) pos += ((SystemClock.elapsedRealtime() - n.posAt) * n.speed).toLong()
+                    pos = pos.coerceIn(0L, n.dur)
+                    slim.frac = pos.toFloat() / n.dur
+                    elapsed.setIfChanged(fmtTime(pos)); total.setIfChanged(fmtTime(n.dur))
+                    progressRow.visibility = View.VISIBLE
+                } else progressRow.visibility = View.GONE
+                root.postDelayed(this, 500)
+            }
+        }
+        root.post(prog)
         root.post(tick)
         return root
     }
@@ -261,6 +383,53 @@ class PlanetView(ctx: Context) : View(ctx) {
     private var orbit = 0f
     private var playing = false
     private var anim: ValueAnimator? = null
+
+    // carátula (se dibuja recortada en el círculo del planeta, con fundido entre canciones)
+    private var curShader: BitmapShader? = null
+    private var prevShader: BitmapShader? = null
+    private var curAlpha = 0f
+    private var prevAlpha = 0f
+    private var prevStart = 0f
+    private var coverAnim: ValueAnimator? = null
+    private val shaderMatrix = Matrix()
+
+    private fun shaderFor(src: Bitmap): BitmapShader {
+        val side = minOf(src.width, src.height)
+        val sq = Bitmap.createBitmap(src, (src.width - side) / 2, (src.height - side) / 2, side, side)
+        val target = if (side > 400) 400 else side          // la radio tiene poca RAM: no guardamos imágenes enormes
+        val bmp = if (target != side) Bitmap.createScaledBitmap(sq, target, target, true) else sq
+        val sh = BitmapShader(bmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        val k = 156f / bmp.width
+        shaderMatrix.setScale(k, k); shaderMatrix.postTranslate(47f, 37f)
+        sh.setLocalMatrix(shaderMatrix)
+        return sh
+    }
+
+    /** Pone la carátula en el círculo; null = vuelve el planeta. Cruza con un fundido de 0,6 s. */
+    fun setCover(src: Bitmap?) {
+        coverAnim?.cancel()
+        prevShader = curShader; prevStart = curAlpha
+        curShader = if (src != null) try { shaderFor(src) } catch (e: Exception) { null } else null
+        if (prevShader == null && curShader == null) { curAlpha = 0f; prevAlpha = 0f; invalidate(); return }
+        coverAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 600
+            addUpdateListener {
+                val f = it.animatedValue as Float
+                curAlpha = if (curShader != null) f else 0f
+                prevAlpha = if (curShader != null) prevStart else prevStart * (1f - f)
+                if (f >= 1f) { prevShader = null; prevAlpha = 0f }
+                invalidate()
+            }
+            start()
+        }
+    }
+
+    private fun drawCover(c: Canvas, sh: BitmapShader?, a: Float) {
+        if (sh == null || a <= 0f) return
+        p.reset(); p.isAntiAlias = true; p.shader = sh; p.alpha = (a * 255).toInt().coerceIn(0, 255)
+        c.drawCircle(125f, 115f, 78f, p)
+        p.shader = null
+    }
 
     private val pts = listOf(
         floatArrayOf(125f, 37f, 178f, 70f, 150f, 110f),
@@ -295,7 +464,7 @@ class PlanetView(ctx: Context) : View(ctx) {
     }
 
     override fun onAttachedToWindow() { super.onAttachedToWindow(); if (playing) startAnim() }
-    override fun onDetachedFromWindow() { anim?.cancel(); anim = null; super.onDetachedFromWindow() }
+    override fun onDetachedFromWindow() { anim?.cancel(); anim = null; coverAnim?.cancel(); super.onDetachedFromWindow() }
 
     override fun onDraw(c: Canvas) {
         val s = minOf(width / 250f, height / 230f)
@@ -323,7 +492,12 @@ class PlanetView(ctx: Context) : View(ctx) {
         }
         c.restore()
 
+        // carátula encima del planeta (la anterior queda debajo mientras entra la nueva)
+        drawCover(c, prevShader, prevAlpha)
+        drawCover(c, curShader, curAlpha)
+
         // luz fija sobre el planeta
+        p.reset(); p.isAntiAlias = true; p.style = Paint.Style.FILL
         p.shader = RadialGradient(
             102f, 84f, 117f, intArrayOf(0x47FFFFFF, 0x00000000, 0x73000000),
             floatArrayOf(0f, 0.6f, 1f), Shader.TileMode.CLAMP
